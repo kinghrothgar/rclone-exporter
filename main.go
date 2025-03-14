@@ -10,8 +10,10 @@ import (
 	_ "github.com/rclone/rclone/backend/s3"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/operations"
+  "github.com/rclone/rclone/fs/walk"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+  "github.com/rclone/rclone/fs/config/configfile"
 )
 
 // Define Prometheus metrics for bucket size and file count.
@@ -37,18 +39,31 @@ func init() {
 	prometheus.MustRegister(bucketFileCount)
 }
 
+func ListDir(ctx context.Context, f fs.Fs) (fs.DirEntries, error) {
+  dirs := fs.DirEntries{}
+  err := walk.ListR(ctx, f, "", false, 1, walk.ListDirs, func(entries fs.DirEntries) error {
+		entries.ForDir(func(dir fs.Directory) {
+			if dir != nil {
+        dirs = append(dirs, dir)
+			}
+		})
+		return nil
+	})
+  return dirs, err
+}
+
 // updateRemoteBuckets lists the top-level directories (buckets) in the given remote using operations.ListDir(),
 // then for each bucket, it calls operations.Count() to get the file count and total size.
 func updateRemoteBuckets(ctx context.Context, remote string) {
 	// Create a new Fs for the remote.
-	f, err := fs.NewFs(remote)
+	f, err := fs.NewFs(ctx, remote)
 	if err != nil {
 		log.Printf("Error creating Fs for remote %q: %v", remote, err)
 		return
 	}
 
 	// List top-level directories (buckets). The empty string ("") lists the root.
-	dirs, err := operations.ListDir(ctx, f, "")
+	dirs, err := ListDir(ctx, f)
 	if err != nil {
 		log.Printf("Error listing directories for remote %q: %v", remote, err)
 		return
@@ -61,7 +76,7 @@ func updateRemoteBuckets(ctx context.Context, remote string) {
 		bucketRemote := remote + bucketName
 
 		// Create a new Fs for the bucket.
-		bucketFs, err := fs.NewFs(bucketRemote)
+		bucketFs, err := fs.NewFs(ctx, bucketRemote)
 		if err != nil {
 			log.Printf("Error creating Fs for bucket %q: %v", bucketRemote, err)
 			continue
@@ -69,7 +84,7 @@ func updateRemoteBuckets(ctx context.Context, remote string) {
 
 		// operations.Count returns file count, directory count, and total size in bytes.
 		// We ignore the directory count.
-		files, _, size, err := operations.Count(ctx, bucketFs, nil)
+		files, size, _, err := operations.Count(ctx, bucketFs)
 		if err != nil {
 			log.Printf("Error counting bucket %q: %v", bucketRemote, err)
 			continue
@@ -84,12 +99,13 @@ func updateRemoteBuckets(ctx context.Context, remote string) {
 
 func main() {
 	// List of remotes to monitor. Adjust these as needed.
-	remotes := []string{"b2:", "s3:"}
+	remotes := []string{"b2:"}
 	ctx := context.Background()
+  configfile.Install()
 
 	// Start a goroutine to periodically update bucket metrics.
 	go func() {
-		ticker := time.NewTicker(10 * time.Minute)
+		ticker := time.NewTicker(60 * time.Minute)
 		defer ticker.Stop()
 		// Run an update immediately.
 		for _, remote := range remotes {
